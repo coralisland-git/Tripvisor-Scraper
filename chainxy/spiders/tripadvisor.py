@@ -14,13 +14,17 @@ from scrapy.http import Request
 
 from selenium import webdriver
 
+from scrapy.xlib.pydispatch import dispatcher
+
+from scrapy import signals
+
 from lxml import etree
 
 from lxml import html
 
-from scrapy.xlib.pydispatch import dispatcher
+from chainxy.items import ChainItem
 
-from scrapy import signals
+from scrapy.contrib.exporter import CsvItemExporter
 
 import time
 
@@ -31,7 +35,7 @@ class tripadvisor(scrapy.Spider):
 
 	name = 'tripadvisor'
 
-	domain = ''
+	domain = 'https://www.tripadvisor.com'
 
 	history = []
 
@@ -39,15 +43,20 @@ class tripadvisor(scrapy.Spider):
 
 	result = []
 
+	ordered = []
+
+	count = 0
+
+
 	def __init__(self):
-
-		filename = './result.json'
-
-		os.remove(filename) if os.path.exists(filename) else None
 
 		dispatcher.connect(self.spider_closed, signals.spider_closed)
 
-		self.driver = webdriver.Chrome("./chromedriver.exe")
+		chrome_options = webdriver.ChromeOptions()
+
+		chrome_options.add_argument("headless")
+
+		self.driver = webdriver.Chrome(chrome_options=chrome_options)
 
 
 	def start_requests(self):
@@ -59,6 +68,8 @@ class tripadvisor(scrapy.Spider):
 
 	def parse(self, response):
 
+		hotel_list = []
+
 		self.driver.get('https://www.tripadvisor.com/')
 
 		location = raw_input(' Location : ')
@@ -67,11 +78,11 @@ class tripadvisor(scrapy.Spider):
 
 		self.driver.find_element_by_class_name('form_submit').click()
 
-		time.sleep(2)
+		time.sleep(3)
 
-		self.driver.find_element_by_id("global-nav-attractions").click()	
+		self.driver.find_element_by_id("global-nav-attractions").click()
 
-		time.sleep(3)	
+		time.sleep(3)
 
 		source = self.driver.page_source.encode("utf8")
 
@@ -79,31 +90,78 @@ class tripadvisor(scrapy.Spider):
 
 		post_list = tree.xpath('//div[@class="attraction_clarity_cell"]')
 
-		time.sleep(2)
+		for post in post_list:
 
-		for post in post_list :
+			name = self.validate(post.xpath('.//div[contains(@class, "listing_title")]/a//text()')[0])
+
+			if '(' not in name:
+
+				if len(hotel_list) > 50:
+
+					break
+
+				hotel_list.append(post)
+
+		pagenation = tree.xpath('//div[contains(@class, "pageNumbers")]//a/@href')
+ 
+		if pagenation and len(hotel_list) < 50:
+
+			for page in pagenation:
+
+				self.driver.get(self.domain + page)
+
+				time.sleep(2)
+
+				source = self.driver.page_source.encode("utf8")
+
+				tree = etree.HTML(source)
+
+				post_list = tree.xpath('//div[@class="attraction_clarity_cell"]')
+
+				if len(hotel_list) < 50 : 
+
+					for post in post_list:
+
+						name = self.validate(post.xpath('.//div[contains(@class, "listing_title")]/a//text()')[0])
+
+						if '(' not in name:
+
+							if len(hotel_list) > 50:
+
+								break
+
+							hotel_list.append(post)
+
+		for hotel in hotel_list :
 
 			try:
 
+				item = ChainItem()
 
-				item = {
+				item['name'] = self.validate(hotel.xpath('.//div[contains(@class, "listing_title")]/a//text()')[0])
 
-					'name' : self.validate(post.xpath('.//div[contains(@class, "listing_title")]/a//text()')[0]),
+				self.ordered.append(item)
 
-					'image' : self.validate(post.xpath('.//img[@class="photo_image"]/@src')[0]),
+				try:
 
-					'link' : 'https://www.tripadvisor.com'+self.validate(post.xpath('.//a[@class="photo_link "]/@href')[0]),
+					item['link'] = self.domain + self.validate(hotel.xpath('.//a[contains(@class, "photo_link")]/@href')[0])
 
-					'lat' : '',
+				except:
 
-					'lng' : ''
+					item['link'] = self.domain + self.validate(hotel.xpath('.//a[contains(@class, "photo_link")]/@onclick')[0]).split("Attractions_List_Click', '")[1].split("',")[0].strip()
 
-				}
+				try:
+
+					item['image'] = self.validate(hotel.xpath('.//img[@class="photo_image"]/@src')[0])
+
+				except:
+
+					pass
 
 				yield scrapy.Request(url = item['link'], callback=self.parse_detail, meta={'item': item})
 
-			except:
-
+			except Exception as e:
+				
 				pass
 
 
@@ -111,13 +169,9 @@ class tripadvisor(scrapy.Spider):
 
 		try:
 
-			data = response.body.split('&center=')[1].split('&maptype=roadmap')[0]
-
 			item = response.meta['item']
 
-			item['lat'] = data.split(',')[0]
-
-			item['lng'] = data.split(',')[1]
+			item['address'] = ' '.join(response.xpath('//div[contains(@class, "is-hidden-mobile blEntry address ui_link")]//span[@class="detail"]//text()').extract())
 
 			self.result.append(item)
 
@@ -130,9 +184,25 @@ class tripadvisor(scrapy.Spider):
 		
 		try:
 
-			with open('result.json', 'w') as outfile:
+			file = open('res.csv', 'w+b')
 
-				json.dump(self.result, outfile)
+			self.exporter = CsvItemExporter(file)
+
+			self.exporter.fields_to_export = ['name', 'image', 'link', 'address']
+
+			self.exporter.start_exporting()
+
+			for item in self.ordered:
+
+				for res in self.result:
+
+					if item['name'] == res['name']:
+
+						self.exporter.export_item(item)
+
+			self.exporter.finish_exporting()
+
+			file.close()
 
 		except:
 
@@ -147,8 +217,3 @@ class tripadvisor(scrapy.Spider):
 		except:
 
 			pass
-
-
-
-# with open('test.txt', 'wb') as f:
-# 	f.write(response.body)
